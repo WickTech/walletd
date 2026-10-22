@@ -7,7 +7,7 @@
 
 A double-entry wallet and payments service. Every money movement is a journal entry whose postings sum to zero. The database itself enforces that, so a bug in the service can't create or destroy money.
 
-> **Status: step 1 of 8.** The skeleton, ledger schema, database invariants and CI are done. The API endpoints come next (see [Roadmap](#roadmap)).
+> **Status: step 2 of 8.** The ledger schema, its database invariants, and the account / top-up / transfer API are done (see [Roadmap](#roadmap)).
 
 ## Ledger invariants (enforced in Postgres)
 
@@ -20,6 +20,36 @@ A double-entry wallet and payments service. Every money movement is a journal en
 | No floating-point money | `bigint` minor units (paise) |
 
 Each invariant has a test in [`LedgerSchemaTests`](src/test/java/com/wicktech/walletd/LedgerSchemaTests.java).
+
+## API
+
+Amounts are integer minor units (`10000` = ₹100.00). Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`.
+
+| Method | Path | Does |
+|---|---|---|
+| `POST` | `/accounts` | Open a wallet: `{"ownerRef": "asha", "currency": "INR"}` → 201 (409 if that owner already has one) |
+| `GET` | `/accounts/{id}` | Balance and details |
+| `GET` | `/accounts/{id}/postings?limit=50` | Ledger history, newest first |
+| `POST` | `/accounts/{id}/top-ups` | Credit from the gateway account: `{"amountMinor": 10000}` |
+| `POST` | `/transfers` | `{"fromAccountId", "toAccountId", "amountMinor", "reference"}` → 201 journal entry; 422 for insufficient funds, same account or currency mismatch |
+| `GET` | `/journal-entries/{id}` | An entry with its postings |
+
+```bash
+A=$(curl -s localhost:8080/accounts -H 'content-type: application/json' -d '{"ownerRef":"asha","currency":"INR"}' | jq -r .id)
+B=$(curl -s localhost:8080/accounts -H 'content-type: application/json' -d '{"ownerRef":"ravi","currency":"INR"}' | jq -r .id)
+curl -s localhost:8080/accounts/$A/top-ups -H 'content-type: application/json' -d '{"amountMinor":10000}'
+curl -s localhost:8080/transfers -H 'content-type: application/json' \
+  -d "{\"fromAccountId\":\"$A\",\"toAccountId\":\"$B\",\"amountMinor\":2500}"
+```
+
+## Concurrency
+
+Each transfer locks both accounts with `SELECT … FOR UPDATE` **in account-id order**, so:
+- simultaneous debits on one wallet queue up instead of failing. In the test, 20 parallel ₹10 transfers from a ₹100 wallet give exactly 10 × `201` and 10 × `422`;
+- transfers in opposite directions (A→B and B→A) can't deadlock;
+- the `@Version` column and a short retry loop are a safety net for anything that slips past the locks.
+
+An earlier version used optimistic locking alone. Under the same test, about half the requests gave up after retries even though funds remained.
 
 ## Schema
 
@@ -53,8 +83,8 @@ Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator) · PostgreS
 ## Roadmap
 
 1. ✅ Skeleton, Compose Postgres, Flyway V1 ledger schema, CI
-2. Accounts + transfer endpoint (double-entry postings in one transaction)
-3. Testcontainers integration tests; parallel-debit concurrency test
+2. ✅ Accounts, top-ups and transfers (double-entry postings in one transaction, ordered row locks)
+3. Testcontainers integration tests in CI; more concurrency and property tests
 4. `Idempotency-Key` filter (replay → same response, different body → 422)
 5. JWT auth, OpenAPI docs, RFC 7807 errors
 6. Razorpay-style HMAC webhook; outbox poller
