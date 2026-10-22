@@ -10,6 +10,12 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate   # Flyway owns the schema
+    properties:
+      hibernate:
+        order_updates: true  # same row-lock order in every transaction: fewer deadlocks
+  mvc:
+    problemdetails:
+      enabled: true          # RFC 9457 bodies for validation and binding errors too
   flyway:
     locations: classpath:db/migration
 
