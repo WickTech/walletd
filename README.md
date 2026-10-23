@@ -7,7 +7,7 @@
 
 A double-entry wallet and payments service. Every money movement is a journal entry whose postings sum to zero. The database itself enforces that, so a bug in the service can't create or destroy money.
 
-> **Status: step 2 of 8.** The ledger schema, its database invariants, and the account / top-up / transfer API are done (see [Roadmap](#roadmap)).
+> **Status: step 3 of 8.** The ledger schema and invariants, the account / top-up / transfer API, and the concurrency tests are done (see [Roadmap](#roadmap)).
 
 ## Ledger invariants (enforced in Postgres)
 
@@ -71,20 +71,24 @@ docker compose up -d          # Postgres 17 on :5432
 ## Test
 
 ```bash
-./mvnw verify
+./mvnw verify                 # real PostgreSQL 17 started in-process, no Docker needed
+./mvnw verify -Pcontainer     # same tests on the official postgres:17 image (Testcontainers, needs Docker)
 ```
 
-The tests start real PostgreSQL 17 binaries in-process ([zonky embedded-postgres](https://github.com/zonkyio/embedded-postgres)), so Docker isn't needed. Flyway applies the same migrations used in production.
+Both paths apply the same Flyway migrations as production. CI runs both. The suite covers:
+- the database invariants (`LedgerSchemaTests`);
+- the HTTP API, plus parallel-overspend and opposite-direction transfer tests (`LedgerApiTests`);
+- a randomized load test (`LedgerConcurrencyTests`): 200 random transfers from 16 threads across 6 wallets, repeated with fresh seeds. Money must be conserved, no wallet negative, and every stored balance equal to its postings. A failure prints the seed.
 
 ## Stack
 
-Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator) · PostgreSQL 17 · Flyway · JUnit 5 + AssertJ · GitHub Actions
+Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator) · PostgreSQL 17 · Flyway · JUnit 5 + AssertJ · Testcontainers · GitHub Actions
 
 ## Roadmap
 
 1. ✅ Skeleton, Compose Postgres, Flyway V1 ledger schema, CI
 2. ✅ Accounts, top-ups and transfers (double-entry postings in one transaction, ordered row locks)
-3. Testcontainers integration tests in CI; more concurrency and property tests
+3. ✅ Testcontainers run in CI; randomized concurrency test
 4. `Idempotency-Key` filter (replay → same response, different body → 422)
 5. JWT auth, OpenAPI docs, RFC 7807 errors
 6. Razorpay-style HMAC webhook; outbox poller

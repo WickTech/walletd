@@ -15,7 +15,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
-@Import(EmbeddedPostgresConfig.class)
+@Import(TestDatabaseConfig.class)
 class WalletdApplicationTests {
 
     @LocalServerPort

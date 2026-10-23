@@ -20,7 +20,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.client.RestClient;
 
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
-@Import(EmbeddedPostgresConfig.class)
+@Import(TestDatabaseConfig.class)
 class LedgerApiTests {
 
     @LocalServerPort
