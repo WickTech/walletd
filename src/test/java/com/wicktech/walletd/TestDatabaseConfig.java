@@ -4,6 +4,7 @@ import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.io.IOException;
 import javax.sql.DataSource;
 import org.postgresql.ds.PGSimpleDataSource;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -21,7 +22,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 @TestConfiguration(proxyBeanMethods = false)
 public class TestDatabaseConfig {
 
-    static final boolean USE_CONTAINER = "container".equals(System.getProperty("walletd.test.db"));
+    private static final String PROPERTY = "walletd.test.db";
 
     /** One container for the whole test run, shared by every Spring context. */
     private static final class Container {
@@ -33,15 +34,20 @@ public class TestDatabaseConfig {
     }
 
     @Bean(destroyMethod = "close")
+    @ConditionalOnProperty(name = PROPERTY, havingValue = "embedded", matchIfMissing = true)
     EmbeddedPostgres embeddedPostgres() throws IOException {
-        return USE_CONTAINER ? null : EmbeddedPostgres.start();
+        return EmbeddedPostgres.start();
     }
 
     @Bean
-    DataSource dataSource(EmbeddedPostgres embedded) {
-        if (!USE_CONTAINER) {
-            return embedded.getPostgresDatabase();
-        }
+    @ConditionalOnProperty(name = PROPERTY, havingValue = "embedded", matchIfMissing = true)
+    DataSource embeddedDataSource(EmbeddedPostgres embedded) {
+        return embedded.getPostgresDatabase();
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = PROPERTY, havingValue = "container")
+    DataSource containerDataSource() {
         var ds = new PGSimpleDataSource();
         ds.setUrl(Container.POSTGRES.getJdbcUrl());
         ds.setUser(Container.POSTGRES.getUsername());
