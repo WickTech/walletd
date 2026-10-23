@@ -15,5 +15,7 @@ jobs:
           distribution: temurin
           java-version: "25"
           cache: maven
-      - name: Build and test
+      - name: Build and test (embedded PostgreSQL)
         run: ./mvnw -B verify
+      - name: Test again on postgres:17 in Docker (Testcontainers)
+        run: ./mvnw -B verify -Pcontainer

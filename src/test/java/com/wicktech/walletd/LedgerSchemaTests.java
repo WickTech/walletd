@@ -13,7 +13,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** The double-entry invariants the database itself enforces (V1__init.sql). */
 @SpringBootTest
-@Import(EmbeddedPostgresConfig.class)
+@Import(TestDatabaseConfig.class)
 class LedgerSchemaTests {
 
     @Autowired
