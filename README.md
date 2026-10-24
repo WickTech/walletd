@@ -5,202 +5,200 @@
 ![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.1-6DB33F?logo=springboot&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)
 
-A double-entry wallet and payments service. Every money movement is a journal entry whose postings sum to zero. The database itself enforces that, so a bug in the service can't create or destroy money.
+A double-entry wallet and payments service. Every money movement is a journal entry whose postings sum to zero, and **the database itself enforces that**, so a bug in the service can't create or destroy money.
 
-> **Status: step 7 of 8.** The service is feature-complete and operable: ledger with database-enforced invariants, idempotent API, JWT auth, signed webhook, outbox relay, nightly audit, metrics and a Docker image (see [Roadmap](#roadmap)). Only the architecture write-up remains.
+It is a small service built the way a payments team would build it: safe to retry, safe under concurrency, auditable, and observable.
 
-## Ledger invariants (enforced in Postgres)
+| Problem | How walletd handles it |
+|---|---|
+| A client times out and retries a payment | `Idempotency-Key`: the retry gets the stored response, money moves once |
+| 20 requests spend the same wallet at once | Ordered row locks: exactly the affordable ones succeed, no deadlock |
+| The payment provider delivers the same event five times | HMAC-signed webhook, credited once per payment id |
+| The service crashes between "money moved" and "event sent" | Transactional outbox: the event row commits with the money |
+| A bug or a manual SQL fix corrupts a balance | Constraint triggers refuse it, and a nightly audit would catch what slips through |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    client([Client app]) -->|"Bearer JWT + Idempotency-Key"| api
+    provider([Payment provider]) -->|"HMAC-signed webhook"| api
+    prom([Prometheus]) -->|"/actuator/prometheus"| api
+    subgraph walletd
+        api["REST API<br/>Spring MVC + Security"] --> idem["Idempotency layer"]
+        idem --> ledger["LedgerService<br/>locks, postings, outbox row"]
+        api --> audit["Reconciliation audit<br/>nightly and on demand"]
+        relay["Outbox relay<br/>every 2 s"]
+    end
+    ledger --> db[("PostgreSQL 17<br/>accounts, postings, journal_entries<br/>idempotency_keys, outbox")]
+    audit --> db
+    relay --> db
+    relay -->|"at least once"| broker([Kafka or queue<br/>via OutboxPublisher])
+```
+
+### Life of a transfer
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as API (JWT + ownership check)
+    participant I as IdempotencyService
+    participant L as LedgerService
+    participant D as PostgreSQL
+    C->>A: POST /transfers with Idempotency-Key
+    A->>A: verify token, does the caller own the source wallet?
+    A->>I: execute(subject, key, request fingerprint)
+    I->>D: BEGIN, claim the key (insert on conflict do nothing)
+    alt key already used
+        I->>D: read the stored response
+        I-->>C: same 201 body + Idempotent-Replayed (422 if the body differs)
+    else first time
+        I->>L: transfer, inside the same transaction
+        L->>D: SELECT FOR UPDATE on both wallets, in id order
+        L->>D: update balances, insert entry + 2 postings + outbox row
+        I->>D: store the response, COMMIT
+        Note over D: deferred trigger at COMMIT checks the entry sums to zero
+        I-->>C: 201 journal entry
+    end
+    Note over D: the outbox relay publishes the event later (at least once)
+```
+
+### Data model
+
+```mermaid
+erDiagram
+    ACCOUNTS ||--o{ POSTINGS : has
+    JOURNAL_ENTRIES ||--|{ POSTINGS : "sums to zero"
+    ACCOUNTS {
+        uuid id PK
+        text owner_ref
+        text type "USER or SYSTEM"
+        char currency
+        bigint balance_minor "never floating point"
+        bigint version "optimistic lock"
+    }
+    JOURNAL_ENTRIES {
+        uuid id PK
+        text kind "TOP_UP, TRANSFER, ..."
+        char currency
+        text reference
+    }
+    POSTINGS {
+        bigint id PK
+        uuid journal_entry_id FK
+        uuid account_id FK
+        bigint amount_minor "positive credit, negative debit"
+    }
+    IDEMPOTENCY_KEYS {
+        text scope PK
+        text idem_key PK
+        text request_hash
+        jsonb response_body
+    }
+    OUTBOX {
+        bigint id PK
+        text event_type
+        jsonb payload
+        timestamptz published_at
+    }
+```
+
+## What the database enforces
+
+These hold even if the application code is wrong:
 
 | Invariant | How |
 |---|---|
-| Every journal entry balances (≥ 2 legs, sum = 0) | Deferred constraint trigger, checked at `COMMIT` |
+| Every journal entry balances (at least 2 legs, sum = 0) | Deferred constraint trigger, checked at `COMMIT` |
 | No mixed currencies inside an entry | Same trigger |
 | User wallets never go negative | `CHECK (type = 'SYSTEM' OR balance_minor >= 0)` |
 | History is append-only | `BEFORE UPDATE/DELETE` triggers on `postings` and `journal_entries` |
-| No floating-point money | `bigint` minor units (paise) |
+| No floating-point money | `bigint` minor units (paise for INR) |
 
-Each invariant has a test in [`LedgerSchemaTests`](src/test/java/com/wicktech/walletd/LedgerSchemaTests.java).
+Each one has a test in [`LedgerSchemaTests`](src/test/java/com/wicktech/walletd/LedgerSchemaTests.java). Migrations: [`src/main/resources/db/migration`](src/main/resources/db/migration).
 
-## API
+## Design decisions
 
-Amounts are integer minor units (`10000` = ₹100.00). Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`, including `401` and `403`. Interactive docs: **`/docs`** (Swagger UI), spec at `/v3/api-docs`.
-
-| Method | Path | Does |
+| Decision | Why | What I measured or rejected |
 |---|---|---|
-| `POST` | `/accounts` | Open a wallet: `{"ownerRef": "asha", "currency": "INR"}` → 201 (409 if that owner already has one) |
-| `GET` | `/accounts/{id}` | Balance and details |
-| `GET` | `/accounts/{id}/postings?limit=50` | Ledger history, newest first |
-| `POST` | `/accounts/{id}/top-ups` | Credit from the gateway account: `{"amountMinor": 10000}`. Needs `Idempotency-Key` |
-| `POST` | `/transfers` | `{"fromAccountId", "toAccountId", "amountMinor", "reference"}` → 201 journal entry; 422 for insufficient funds, same account or currency mismatch. Needs `Idempotency-Key` |
-| `GET` | `/journal-entries/{id}` | An entry with its postings |
+| **Ordered `SELECT … FOR UPDATE` row locks**, with `@Version` and a retry loop as a safety net | Transfers on a busy wallet queue instead of failing, and A→B / B→A can't deadlock | Optimistic locking alone: in 20 parallel ₹10 transfers from a ₹100 wallet, about half the requests ran out of retries even though funds remained. With ordered locks the same test gives exactly 10 × `201` and 10 × `422` |
+| **Idempotency record stored in the same transaction** as the money movement | A crash can't leave "money moved, key not recorded" or the reverse; a parallel request with the same key blocks on the unique index and then replays | Failed requests are deliberately not stored, so a client can top up and retry with the same key |
+| **Transactional outbox** instead of publishing from the request | Publishing after commit can lose the event; publishing before can announce money that never moved | Delivery is at least once, so consumers de-duplicate on the event id |
+| **Webhook: verify the raw bytes before parsing**, constant-time compare, signed timestamp | Never trust unsigned input; a captured request can't be replayed after 5 minutes | The payment id is the idempotency key and is kept forever, so a very late redelivery can't credit twice |
+| **Wallets you don't own return 404** | Account ids can't be probed | |
+| **Top-ups are ADMIN only** | Otherwise any user could mint money; in production the signed webhook does it | |
+| **Resource server, no password storage** | Tokens come from an identity provider; walletd only verifies them | HS256 with a shared secret is simple. See limitations |
+| **Nightly audit as a second line of defence** | Triggers stop most corruption; the audit catches what a manual SQL fix or bad migration could still do | Runs in one `REPEATABLE READ` snapshot so concurrent transfers can't cause false alarms |
+| **Tests on real PostgreSQL**, never H2 or mocks | The invariants live in Postgres triggers and locks | In-process Postgres locally, `postgres:17` in Docker in CI |
 
-## Authentication and who may do what
-
-walletd is a resource server: every request except `/actuator/health`, the docs and the webhook needs `Authorization: Bearer <JWT>` (HS256, signed with `WALLETD_JWT_SECRET`, `iss` = `walletd`, roles in the `roles` claim). It stores no passwords: tokens come from your identity provider.
-
-| Rule | Detail |
-|---|---|
-| A wallet belongs to the token's `sub` | `POST /accounts` opens one for you; naming another owner needs ADMIN (`403` otherwise) |
-| Others' wallets don't exist for you | Reading, listing postings or spending from a wallet you don't own returns `404`, so ids can't be probed |
-| Transfers start from your wallet | Any wallet can receive |
-| Top-ups are ADMIN only | Otherwise anyone could mint money; in production the signed payment webhook does this |
-| Idempotency keys are per caller | Two users can use the same key without colliding |
-| Bad, expired, wrong-issuer or wrongly-signed token | `401` |
-
-For local demos, `WALLETD_DEV_TOKENS=true` enables `POST /dev/token`, which mints a token for any subject. **It must stay off in production.** The app refuses to start without a secret of at least 32 characters.
-
-## Idempotent requests
-
-`POST /transfers` and `POST /accounts/{id}/top-ups` require an `Idempotency-Key` header (1–255 printable ASCII characters, e.g. a UUID). A client that times out can safely retry:
-
-| Situation | Result |
-|---|---|
-| First request | Runs once; `201` |
-| Same key, same body | The stored response again, plus `Idempotent-Replayed: true`. No second money movement |
-| Same key, different body or endpoint | `422` |
-| Same key sent in parallel | One runs; the others wait for it and get its response (tested with 20 parallel requests: one journal entry) |
-| Request that failed (e.g. insufficient funds) | Not stored. After fixing the cause, the same key works |
-| Header missing or malformed | `400` |
-
-How it works: the key row is claimed, the ledger is updated and the response is stored **in one database transaction**, so a crash can't leave "paid but not recorded" or the reverse. A parallel request blocks on the key's unique index until the first one commits or rolls back.
+## Quick start
 
 ```bash
-export WALLETD_JWT_SECRET=$(openssl rand -hex 32) WALLETD_WEBHOOK_SECRET=$(openssl rand -hex 32)
-WALLETD_DEV_TOKENS=true ./mvnw spring-boot:run &      # see "Run locally"
+docker compose up -d                                    # Postgres 17 on :5432
+export WALLETD_JWT_SECRET=$(openssl rand -hex 32)       # 32+ characters, verifies bearer tokens
+export WALLETD_WEBHOOK_SECRET=$(openssl rand -hex 32)   # 32+ characters, verifies payment webhooks
+WALLETD_DEV_TOKENS=true ./mvnw spring-boot:run          # local demos only: enables POST /dev/token
+# health: http://localhost:8080/actuator/health    docs: http://localhost:8080/docs
+```
 
+Then, in another terminal:
+
+```bash
 tok() { curl -s localhost:8080/dev/token -H 'content-type: application/json' -d "$1" | jq -r .token; }
 OPS=$(tok '{"subject":"ops","admin":true}'); ASHA=$(tok '{"subject":"asha"}'); RAVI=$(tok '{"subject":"ravi"}')
 
 open() { curl -s localhost:8080/accounts -H "Authorization: Bearer $1" -H 'content-type: application/json' -d '{"currency":"INR"}' | jq -r .id; }
 A=$(open $ASHA); B=$(open $RAVI)
 
+# ops credits asha ₹100.00 (amounts are paise)
 curl -s localhost:8080/accounts/$A/top-ups -H "Authorization: Bearer $OPS" -H 'content-type: application/json' \
   -H "Idempotency-Key: $(uuidgen)" -d '{"amountMinor":10000}'
-curl -s localhost:8080/transfers -H "Authorization: Bearer $ASHA" -H 'content-type: application/json' \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -d "{\"fromAccountId\":\"$A\",\"toAccountId\":\"$B\",\"amountMinor\":2500}"
+
+# asha pays ravi ₹25.00; sending this exact request again returns the stored response, money moves once
+KEY=$(uuidgen)
+for i in 1 2; do
+  curl -s -i localhost:8080/transfers -H "Authorization: Bearer $ASHA" -H 'content-type: application/json' \
+    -H "Idempotency-Key: $KEY" \
+    -d "{\"fromAccountId\":\"$A\",\"toAccountId\":\"$B\",\"amountMinor\":2500}" | grep -iE "^HTTP|idempotent-replayed"
+done
+
 curl -s localhost:8080/accounts/$B -H "Authorization: Bearer $RAVI"      # balanceMinor: 2500
 ```
 
-## Concurrency
+`scripts/smoke.sh` runs a longer version of this (ownership rules, the signed webhook and its redelivery, the audit, metrics) and asserts every result. CI runs it against the Docker image.
 
-Each transfer locks both accounts with `SELECT … FOR UPDATE` **in account-id order**, so:
-- simultaneous debits on one wallet queue up instead of failing. In the test, 20 parallel ₹10 transfers from a ₹100 wallet give exactly 10 × `201` and 10 × `422`;
-- transfers in opposite directions (A→B and B→A) can't deadlock;
-- the `@Version` column and a short retry loop are a safety net for anything that slips past the locks.
+**Full reference** (every endpoint, auth rules, idempotency table, webhook signing, outbox, metrics, configuration, Docker): [`docs/REFERENCE.md`](docs/REFERENCE.md).
 
-An earlier version used optimistic locking alone. Under the same test, about half the requests gave up after retries even though funds remained.
-
-## Payment webhook
-
-`POST /webhooks/payments` is how money normally enters: the payment provider calls it when a payment is captured, and the wallet is credited **once per `paymentId`**, however often the provider retries. It is not bearer-authenticated; the body is signed instead.
-
-- Headers: `X-Walletd-Timestamp: <epoch seconds>` and `X-Walletd-Signature: sha256=<hex>`, where the signature is `HMAC-SHA256(secret, "<timestamp>.<raw body>")` with `WALLETD_WEBHOOK_SECRET` (32+ characters, required).
-- The signature is checked on the raw bytes **before** the JSON is parsed, with a constant-time comparison. Deliveries whose timestamp is more than 5 minutes off are rejected, so a captured request can't be replayed later. Any signature problem is a plain `401`.
-- Body: `{"eventId","type":"payment.captured","paymentId","accountId","amountMinor","currency"}`. Other event types get `200 {"status":"ignored"}` so the provider stops retrying.
-- Results: `200 credited`, or `200 duplicate` for a redelivery (same entry id back). The same `paymentId` with a different amount or wallet is refused with `422` and nothing is credited. Unknown wallet is `404`, currency mismatch `422`.
+## Testing
 
 ```bash
-BODY='{"eventId":"evt_1","type":"payment.captured","paymentId":"pay_123","accountId":"'$A'","amountMinor":5000,"currency":"INR"}'
-TS=$(date +%s)
-SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$WALLETD_WEBHOOK_SECRET" -hex | sed 's/^.* //')
-curl -s localhost:8080/webhooks/payments -H 'content-type: application/json' \
-  -H "X-Walletd-Timestamp: $TS" -H "X-Walletd-Signature: sha256=$SIG" -d "$BODY"
+./mvnw verify                 # 46 tests on real PostgreSQL 17 started in-process, no Docker needed
+./mvnw verify -Pcontainer     # the same tests on the official postgres:17 image (Testcontainers)
 ```
 
-## Outbox: events that can't be lost
+- **Invariants**: unbalanced, single-leg and mixed-currency entries, negative balances and edits to history are rejected by the database itself.
+- **Concurrency**: parallel overspend, opposite-direction transfers (no deadlock), and a randomized load test (200 transfers from 16 threads over 6 wallets, repeated with fresh seeds, prints the seed on failure) that checks money is conserved and every balance equals its postings.
+- **Idempotency**: replay, mismatch, retry after failure, and 20 parallel requests with one key creating exactly one entry.
+- **Security**: missing, garbage, expired, wrong-issuer and wrongly-signed tokens; ownership; ADMIN-only top-ups.
+- **Webhook and outbox**: forged, tampered, stale and malformed deliveries; 10 parallel deliveries of one payment; a failing broker; 4 parallel relays that never double-publish.
+- **Audit and metrics**: a hand-edited balance is detected; metrics exist and are admin-only.
+- **End to end**: CI builds the Docker image, runs it against Postgres and runs `scripts/smoke.sh`.
 
-Every ledger change also writes an event row (`outbox` table) **in the same transaction**, so an event exists if and only if the money moved. A background relay (`OutboxRelay`, every 2 s) claims unpublished rows with `FOR UPDATE SKIP LOCKED`, hands them to an `OutboxPublisher` and marks them done. The default publisher only logs; define your own `OutboxPublisher` bean to send to Kafka or a queue.
+Bugs the tests caught while building this are in the commit history (for example `401` responses that were labelled `ISO-8859-1`, and a dev endpoint that rejected a body without `admin`).
 
-- **At least once:** if the broker is down, the row stays and is retried in order; a crash between publish and commit re-sends. Consumers should de-duplicate on the event id (`OutboxMessage.id`).
-- Several instances can run the relay at once without publishing the same row twice at the same time (tested with 4 parallel relays over 60 events).
-- Turn the background jobs off with `WALLETD_SCHEDULING_ENABLED=false` (tests do this and call the relay directly).
+## Limitations and what I would do next
 
-## Operating it
-
-**Nightly audit.** `ReconciliationService` (02:00 by default, `walletd.reconciliation.cron`) checks, inside one consistent snapshot, that every stored balance equals the sum of its postings, every journal entry sums to zero, and money is conserved per currency. `GET /admin/reconciliation` (ADMIN) runs it on demand. Any finding is logged at `ERROR` and shown by the `walletd_reconciliation_discrepancies` gauge. The test for it edits a balance by hand and checks the audit catches the 2 resulting discrepancies.
-
-**Metrics** at `GET /actuator/prometheus` (ADMIN bearer token; Prometheus supports a `bearer_token` scrape setting):
-
-| Metric | Why it matters |
-|---|---|
-| `walletd_ledger_entries_total{kind}` | Committed money movements only (counted after commit) |
-| `walletd_requests_rejected_total{reason}` | Spikes of `InsufficientFunds`, `KeyReused`… |
-| `walletd_webhook_deliveries_total{result}` / `walletd_webhook_rejected_total{reason}` | `credited`, `duplicate`, `ignored`; bad signatures = someone probing |
-| `walletd_idempotency_replays_total` | How often clients retry |
-| `walletd_outbox_pending`, `walletd_outbox_oldest_age_seconds` | Broker or relay stuck |
-| `walletd_reconciliation_discrepancies`, `…_last_run_timestamp_seconds` | Alert on `> 0` or on a stale timestamp |
-
-**Housekeeping.** Client idempotency keys are deleted after 24 h. Keys in the `webhook:` scope are kept forever, because they are what stops a provider's very late redelivery from crediting twice. Graceful shutdown finishes in-flight requests; `/actuator/health/liveness` and `/readiness` are enabled for orchestrators.
-
-**Configuration** (environment variables):
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `SPRING_DATASOURCE_URL`, `_USERNAME`, `_PASSWORD` | yes | PostgreSQL 17; Flyway migrates on start |
-| `WALLETD_JWT_SECRET` | yes, 32+ chars | Verifies bearer tokens |
-| `WALLETD_WEBHOOK_SECRET` | yes, 32+ chars | Verifies payment webhooks |
-| `WALLETD_DEV_TOKENS` | no, default `false` | `POST /dev/token`: **local demos only** |
-| `WALLETD_SCHEDULING_ENABLED` | no, default `true` | Background jobs (outbox relay, audit, key cleanup) |
-
-**Docker.** The multi-stage `Dockerfile` builds with the Maven wrapper and runs a JRE as a non-root user:
-
-```bash
-docker build -t walletd .
-docker run --rm -p 8080:8080 --network host \
-  -e SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/walletd -e SPRING_DATASOURCE_USERNAME=walletd \
-  -e SPRING_DATASOURCE_PASSWORD=walletd -e WALLETD_JWT_SECRET=$(openssl rand -hex 32) \
-  -e WALLETD_WEBHOOK_SECRET=$(openssl rand -hex 32) walletd
-```
-
-CI builds this image, starts it against a Postgres service and runs [`scripts/smoke.sh`](scripts/smoke.sh): tokens, ownership rules, an idempotent top-up retry, transfers, a signed webhook and its redelivery, a forged signature, the audit, metrics and the OpenAPI spec. Run it against your own instance with `BASE=http://localhost:8080 WALLETD_WEBHOOK_SECRET=... scripts/smoke.sh` (needs `WALLETD_DEV_TOKENS=true`).
-
-## Schema
-
-```
-accounts ──< postings >── journal_entries
-idempotency_keys   (scope, key) → stored response, for safe retries
-outbox             events written in the ledger transaction, published later
-```
-
-Migrations: [`src/main/resources/db/migration`](src/main/resources/db/migration) (Flyway).
-
-## Run locally
-
-```bash
-docker compose up -d                                  # Postgres 17 on :5432
-export WALLETD_JWT_SECRET=$(openssl rand -hex 32)       # 32+ characters, required (verifies bearer tokens)
-export WALLETD_WEBHOOK_SECRET=$(openssl rand -hex 32)   # 32+ characters, required (verifies payment webhooks)
-WALLETD_DEV_TOKENS=true ./mvnw spring-boot:run        # local demos only: enables POST /dev/token
-# health: http://localhost:8080/actuator/health   docs: http://localhost:8080/docs
-```
-
-## Test
-
-```bash
-./mvnw verify                 # real PostgreSQL 17 started in-process, no Docker needed
-./mvnw verify -Pcontainer     # same tests on the official postgres:17 image (Testcontainers, needs Docker)
-```
-
-Both paths apply the same Flyway migrations as production. CI runs both. The suite covers:
-- the database invariants (`LedgerSchemaTests`);
-- the HTTP API, plus parallel-overspend and opposite-direction transfer tests (`LedgerApiTests`);
-- a randomized load test (`LedgerConcurrencyTests`): 200 random transfers from 16 threads across 6 wallets, repeated with fresh seeds. Money must be conserved, no wallet negative, and every stored balance equal to its postings. A failure prints the seed.
+- **Tokens are HS256 with a shared secret.** Fine for one service and a trusted issuer; in production verify asymmetric tokens from an identity provider (swap the `JwtDecoder` bean for a JWKS one).
+- **One currency per wallet, no FX.** The schema reserves `REFUND` and `ADJUSTMENT` entry kinds, but there is no API for them yet (no refunds or holds).
+- **Outbox order is only guaranteed with one relay.** With several instances, consumers must not rely on order (they must already de-duplicate).
+- **The audit scans everything.** Fine for millions of rows once a night; at larger scale it would be incremental or run on a replica.
+- **No rate limiting and only a `limit` on the postings list** (no cursor).
+- **Not deployed.** The next step is the same service on AWS (ECS and RDS) with Terraform.
 
 ## Stack
 
-Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator, Security resource server) · springdoc OpenAPI · PostgreSQL 17 · Flyway · JUnit 5 + AssertJ · Testcontainers · GitHub Actions
-
-## Roadmap
-
-1. ✅ Skeleton, Compose Postgres, Flyway V1 ledger schema, CI
-2. ✅ Accounts, top-ups and transfers (double-entry postings in one transaction, ordered row locks)
-3. ✅ Testcontainers run in CI; randomized concurrency test
-4. ✅ `Idempotency-Key` support (replay → same response, different body → 422)
-5. ✅ JWT auth, ownership rules, OpenAPI docs, RFC 9457 errors
-6. ✅ Signed payment webhook (HMAC + replay window); outbox relay
-7. ✅ Nightly reconciliation, Prometheus metrics, key cleanup, Docker image + CI smoke test (deploy: see the AWS/Terraform step of the portfolio plan)
-8. Architecture diagram and curl walkthrough
+Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator, Security resource server) · springdoc OpenAPI · PostgreSQL 17 · Flyway · Micrometer and Prometheus · JUnit 5, AssertJ and Testcontainers · Docker · GitHub Actions
 
 ## License
 
