@@ -2,6 +2,7 @@ package com.wicktech.walletd.api;
 
 import com.wicktech.walletd.idempotency.IdempotencyException;
 import com.wicktech.walletd.ledger.LedgerException;
+import com.wicktech.walletd.webhook.WebhookException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -34,6 +35,14 @@ class ApiExceptionHandler {
             case IdempotencyException.KeyReused ignored -> HttpStatus.UNPROCESSABLE_CONTENT;
             case IdempotencyException.InProgress ignored -> HttpStatus.CONFLICT;
         };
+        var problem = ProblemDetail.forStatusAndDetail(status, e.getMessage());
+        problem.setTitle(e.getClass().getSimpleName().replaceAll("([a-z])([A-Z])", "$1 $2"));
+        return problem;
+    }
+
+    @ExceptionHandler(WebhookException.class)
+    ProblemDetail webhook(WebhookException e) {
+        var status = e instanceof WebhookException.BadSignature ? HttpStatus.UNAUTHORIZED : HttpStatus.BAD_REQUEST;
         var problem = ProblemDetail.forStatusAndDetail(status, e.getMessage());
         problem.setTitle(e.getClass().getSimpleName().replaceAll("([a-z])([A-Z])", "$1 $2"));
         return problem;
