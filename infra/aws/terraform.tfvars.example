@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars (git-ignored) and adjust. Every value shown is optional.
+
+aws_region  = "ap-south-1"
+environment = "demo"
+
+# Use a NAT gateway and private subnets for the containers (about $33/month more).
+# use_nat_gateway = true
+
+# Serve HTTPS: request a certificate in AWS Certificate Manager (same region) and point a DNS name at the
+# load balancer first. Required before real bearer tokens go over the wire.
+# acm_certificate_arn = "arn:aws:acm:ap-south-1:123456789012:certificate/..."
+
+# Production-like settings: deletion protection, final snapshot, standby database, two tasks.
+# protect_data = true
+# db_multi_az  = true
+# min_tasks    = 2
+
+# alarm_email = "you@example.com"
+
+# Set to false if your AWS account already has a GitHub OIDC provider.
+# create_github_oidc_provider = false

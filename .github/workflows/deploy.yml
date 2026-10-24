@@ -1,0 +1,73 @@
+name: Deploy to AWS
+
+# Manual: Actions -> "Deploy to AWS" -> Run workflow. Builds the image, pushes it to ECR under the commit's
+# SHA, registers a new ECS task definition revision with it, waits until the service is stable and checks the
+# health endpoint. If the new tasks keep failing, ECS rolls back by itself (deployment circuit breaker).
+#
+# No AWS keys are stored in GitHub: the job exchanges its OIDC token for a short-lived role that only the
+# main branch of this repository may assume (see infra/aws/github_oidc.tf).
+#
+# One-time setup: deploy infra/aws (see infra/README.md), then set these repository VARIABLES (not secrets);
+# `tofu output github_actions_variables` prints the exact commands.
+#   AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECR_REPOSITORY, ECS_CLUSTER, ECS_SERVICE, APP_URL
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # for the OIDC token
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, push, roll out
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the image
+        id: image
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Register a task definition revision with the new image
+        id: taskdef
+        run: |
+          CURRENT=$(aws ecs describe-task-definition --task-definition "$ECS_SERVICE" --query taskDefinition)
+          NEW=$(jq --arg image "${{ steps.image.outputs.uri }}" '
+              .containerDefinitions[0].image = $image
+              | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
+            ' <<<"$CURRENT")
+          ARN=$(aws ecs register-task-definition --cli-input-json "$NEW" --query taskDefinition.taskDefinitionArn --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Roll out and wait
+        run: |
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "${{ steps.taskdef.outputs.arn }}" >/dev/null
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+      - name: Health check
+        if: vars.APP_URL != ''
+        run: curl -fsS --retry 10 --retry-delay 6 --retry-connrefused "${{ vars.APP_URL }}/actuator/health"
