@@ -1,19 +1,15 @@
 package com.wicktech.walletd.ledger;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
-import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.dao.ConcurrencyFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -39,11 +35,9 @@ public class LedgerService {
     private final OutboxRepository outbox;
     private final TransactionTemplate tx;
     private final TransactionTemplate readOnly;
-    private final MeterRegistry metrics;
 
     public LedgerService(AccountRepository accounts, JournalEntryRepository entries, PostingRepository postings,
-            OutboxRepository outbox, PlatformTransactionManager txManager, MeterRegistry metrics) {
-        this.metrics = metrics;
+            OutboxRepository outbox, PlatformTransactionManager txManager) {
         this.accounts = accounts;
         this.entries = entries;
         this.postings = postings;
@@ -79,37 +73,24 @@ public class LedgerService {
                 .orElse(null));
     }
 
-    /** Credits a user wallet from the gateway clearing account (the payment webhook calls this). */
+    /** Credits a user wallet from the gateway clearing account (the webhook calls this in step 6). */
     public Posted topUp(UUID accountId, long amountMinor, String reference) {
-        return withRetry(() -> tx.execute(s -> topUpInTx(accountId, amountMinor, reference)));
-    }
-
-    public Posted transfer(UUID fromId, UUID toId, long amountMinor, String reference) {
-        return withRetry(() -> tx.execute(s -> transferInTx(fromId, toId, amountMinor, reference)));
-    }
-
-    /**
-     * Same as {@link #topUp} but joins the caller's transaction and does not retry: the caller owns
-     * the transaction boundary (the idempotency layer stores its record in the same transaction).
-     */
-    public Posted topUpInTx(UUID accountId, long amountMinor, String reference) {
         requirePositive(amountMinor);
         var target = account(accountId);
         var gateway = systemAccount(GATEWAY_OWNER, target.getCurrency());
-        return post(JournalKind.TOP_UP, gateway.getId(), accountId, amountMinor, reference);
+        return withRetry(() -> post(JournalKind.TOP_UP, gateway.getId(), accountId, amountMinor, reference));
     }
 
-    /** Same as {@link #transfer} but joins the caller's transaction and does not retry. */
-    public Posted transferInTx(UUID fromId, UUID toId, long amountMinor, String reference) {
+    public Posted transfer(UUID fromId, UUID toId, long amountMinor, String reference) {
         requirePositive(amountMinor);
         if (fromId.equals(toId)) {
             throw new LedgerException.InvalidTransfer("Source and destination accounts must differ");
         }
-        return post(JournalKind.TRANSFER, fromId, toId, amountMinor, reference);
+        return withRetry(() -> post(JournalKind.TRANSFER, fromId, toId, amountMinor, reference));
     }
 
     private Posted post(JournalKind kind, UUID debitId, UUID creditId, long amountMinor, String reference) {
-        return Objects.requireNonNull(tx.execute(s -> {
+        return tx.execute(s -> {
             // Lock in a fixed order (by id) so opposite-direction transfers can't deadlock.
             var first = debitId.compareTo(creditId) < 0 ? debitId : creditId;
             var second = first.equals(debitId) ? creditId : debitId;
@@ -137,18 +118,7 @@ public class LedgerService {
                     "{\"entryId\":\"%s\",\"kind\":\"%s\",\"currency\":\"%s\",\"amountMinor\":%d,"
                             + "\"debitAccountId\":\"%s\",\"creditAccountId\":\"%s\"}",
                     entry.getId(), kind, entry.getCurrency(), amountMinor, debitId, creditId)));
-            countAfterCommit(kind);
             return new Posted(entry, legs);
-        }));
-    }
-
-    /** Counts only entries that really committed (the surrounding transaction may still roll back). */
-    private void countAfterCommit(JournalKind kind) {
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                metrics.counter("walletd.ledger.entries", "kind", kind.name()).increment();
-            }
         });
     }
 
@@ -156,8 +126,7 @@ public class LedgerService {
         return accounts.findForUpdate(id).orElseThrow(() -> new LedgerException.AccountNotFound(id));
     }
 
-    /** Retries a whole transaction that lost a race; must be called outside any transaction. */
-    public <T> T withRetry(Supplier<T> attempt) {
+    private <T> T withRetry(Supplier<T> attempt) {
         for (int i = 1; ; i++) {
             try {
                 return attempt.get();

@@ -1,11 +1,6 @@
-server:
-  shutdown: graceful          # finish in-flight requests on SIGTERM
-
 spring:
   application:
     name: walletd
-  lifecycle:
-    timeout-per-shutdown-phase: 20s
   datasource:
     # Matches compose.yaml for local runs; override with SPRING_DATASOURCE_* in deploys.
     url: jdbc:postgresql://localhost:5432/walletd
@@ -28,22 +23,8 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus
+        include: health,info
   endpoint:
     health:
       probes:
         enabled: true
-
-walletd:
-  security:
-    jwt-secret: ${WALLETD_JWT_SECRET:}          # required: at least 32 characters
-    dev-token-endpoint: ${WALLETD_DEV_TOKENS:false}   # POST /dev/token; local demos only
-    issuer: walletd
-    token-ttl: 1h
-  webhook:
-    secret: ${WALLETD_WEBHOOK_SECRET:}   # required: shared with the payment provider, 32+ characters
-    tolerance: 5m
-
-springdoc:
-  swagger-ui:
-    path: /docs
