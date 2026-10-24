@@ -10,7 +10,7 @@ import tools.jackson.databind.json.JsonMapper;
 /** Minimal JSON-over-HTTP client for the integration tests. */
 final class TestApi {
 
-    record Res(int status, Map<?, ?> body, HttpHeaders headers) {
+    record Res(int status, Map<?, ?> body, HttpHeaders headers, String text) {
     }
 
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
@@ -48,7 +48,7 @@ final class TestApi {
         return spec.exchange((req, res) -> {
             var text = new String(res.getBody().readAllBytes());
             Map<?, ?> parsed = text.startsWith("{") ? MAPPER.readValue(text, Map.class) : Map.of();
-            return new Res(res.getStatusCode().value(), parsed, res.getHeaders());
+            return new Res(res.getStatusCode().value(), parsed, res.getHeaders(), text);
         });
     }
 }

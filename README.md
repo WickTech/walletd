@@ -7,7 +7,7 @@
 
 A double-entry wallet and payments service. Every money movement is a journal entry whose postings sum to zero. The database itself enforces that, so a bug in the service can't create or destroy money.
 
-> **Status: step 6 of 8.** Ledger schema and invariants, the account / top-up / transfer API, concurrency tests, idempotent requests, JWT auth with OpenAPI docs, the signed payment webhook and the outbox relay are done (see [Roadmap](#roadmap)).
+> **Status: step 7 of 8.** The service is feature-complete and operable: ledger with database-enforced invariants, idempotent API, JWT auth, signed webhook, outbox relay, nightly audit, metrics and a Docker image (see [Roadmap](#roadmap)). Only the architecture write-up remains.
 
 ## Ledger invariants (enforced in Postgres)
 
@@ -116,6 +116,45 @@ Every ledger change also writes an event row (`outbox` table) **in the same tran
 - Several instances can run the relay at once without publishing the same row twice at the same time (tested with 4 parallel relays over 60 events).
 - Turn the background jobs off with `WALLETD_SCHEDULING_ENABLED=false` (tests do this and call the relay directly).
 
+## Operating it
+
+**Nightly audit.** `ReconciliationService` (02:00 by default, `walletd.reconciliation.cron`) checks, inside one consistent snapshot, that every stored balance equals the sum of its postings, every journal entry sums to zero, and money is conserved per currency. `GET /admin/reconciliation` (ADMIN) runs it on demand. Any finding is logged at `ERROR` and shown by the `walletd_reconciliation_discrepancies` gauge. The test for it edits a balance by hand and checks the audit catches the 2 resulting discrepancies.
+
+**Metrics** at `GET /actuator/prometheus` (ADMIN bearer token; Prometheus supports a `bearer_token` scrape setting):
+
+| Metric | Why it matters |
+|---|---|
+| `walletd_ledger_entries_total{kind}` | Committed money movements only (counted after commit) |
+| `walletd_requests_rejected_total{reason}` | Spikes of `InsufficientFunds`, `KeyReused`… |
+| `walletd_webhook_deliveries_total{result}` / `walletd_webhook_rejected_total{reason}` | `credited`, `duplicate`, `ignored`; bad signatures = someone probing |
+| `walletd_idempotency_replays_total` | How often clients retry |
+| `walletd_outbox_pending`, `walletd_outbox_oldest_age_seconds` | Broker or relay stuck |
+| `walletd_reconciliation_discrepancies`, `…_last_run_timestamp_seconds` | Alert on `> 0` or on a stale timestamp |
+
+**Housekeeping.** Client idempotency keys are deleted after 24 h. Keys in the `webhook:` scope are kept forever, because they are what stops a provider's very late redelivery from crediting twice. Graceful shutdown finishes in-flight requests; `/actuator/health/liveness` and `/readiness` are enabled for orchestrators.
+
+**Configuration** (environment variables):
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `SPRING_DATASOURCE_URL`, `_USERNAME`, `_PASSWORD` | yes | PostgreSQL 17; Flyway migrates on start |
+| `WALLETD_JWT_SECRET` | yes, 32+ chars | Verifies bearer tokens |
+| `WALLETD_WEBHOOK_SECRET` | yes, 32+ chars | Verifies payment webhooks |
+| `WALLETD_DEV_TOKENS` | no, default `false` | `POST /dev/token`: **local demos only** |
+| `WALLETD_SCHEDULING_ENABLED` | no, default `true` | Background jobs (outbox relay, audit, key cleanup) |
+
+**Docker.** The multi-stage `Dockerfile` builds with the Maven wrapper and runs a JRE as a non-root user:
+
+```bash
+docker build -t walletd .
+docker run --rm -p 8080:8080 --network host \
+  -e SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/walletd -e SPRING_DATASOURCE_USERNAME=walletd \
+  -e SPRING_DATASOURCE_PASSWORD=walletd -e WALLETD_JWT_SECRET=$(openssl rand -hex 32) \
+  -e WALLETD_WEBHOOK_SECRET=$(openssl rand -hex 32) walletd
+```
+
+CI builds this image, starts it against a Postgres service and runs [`scripts/smoke.sh`](scripts/smoke.sh): tokens, ownership rules, an idempotent top-up retry, transfers, a signed webhook and its redelivery, a forged signature, the audit, metrics and the OpenAPI spec. Run it against your own instance with `BASE=http://localhost:8080 WALLETD_WEBHOOK_SECRET=... scripts/smoke.sh` (needs `WALLETD_DEV_TOKENS=true`).
+
 ## Schema
 
 ```
@@ -160,7 +199,7 @@ Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator, Security re
 4. ✅ `Idempotency-Key` support (replay → same response, different body → 422)
 5. ✅ JWT auth, ownership rules, OpenAPI docs, RFC 9457 errors
 6. ✅ Signed payment webhook (HMAC + replay window); outbox relay
-7. Nightly reconciliation job, Prometheus metrics, Dockerfile, deploy
+7. ✅ Nightly reconciliation, Prometheus metrics, key cleanup, Docker image + CI smoke test (deploy: see the AWS/Terraform step of the portfolio plan)
 8. Architecture diagram and curl walkthrough
 
 ## License

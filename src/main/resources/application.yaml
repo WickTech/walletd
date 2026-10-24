@@ -1,6 +1,11 @@
+server:
+  shutdown: graceful          # finish in-flight requests on SIGTERM
+
 spring:
   application:
     name: walletd
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   datasource:
     # Matches compose.yaml for local runs; override with SPRING_DATASOURCE_* in deploys.
     url: jdbc:postgresql://localhost:5432/walletd
@@ -23,7 +28,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       probes:

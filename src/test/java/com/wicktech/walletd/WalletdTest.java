@@ -18,6 +18,8 @@ import org.springframework.context.annotation.Import;
         "walletd.security.dev-token-endpoint=true",
         "walletd.webhook.secret=webhook-secret-webhook-secret-0123456789",
         "walletd.scheduling.enabled=false", // tests call the jobs themselves
+        "management.defaults.metrics.export.enabled=true", // Boot switches export off in tests by default
+        "management.prometheus.metrics.export.enabled=true",
 })
 @Import({TestDatabaseConfig.class, RecordingPublisherConfig.class})
 @interface WalletdTest {

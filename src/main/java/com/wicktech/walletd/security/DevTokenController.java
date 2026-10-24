@@ -18,7 +18,8 @@ import org.springframework.web.bind.annotation.RestController;
 @ConditionalOnProperty(name = "walletd.security.dev-token-endpoint", havingValue = "true")
 class DevTokenController {
 
-    record TokenRequest(@NotBlank @Size(max = 100) String subject, boolean admin) {
+    /** {@code admin} may be omitted (then false); a primitive boolean would make a missing field a 400. */
+    record TokenRequest(@NotBlank @Size(max = 100) String subject, Boolean admin) {
     }
 
     record TokenResponse(String token, String tokenType, long expiresInSeconds) {
@@ -33,6 +34,6 @@ class DevTokenController {
     @PostMapping("/dev/token")
     @Operation(summary = "Local demo only: mint a token for any subject")
     TokenResponse token(@Valid @RequestBody TokenRequest req) {
-        return new TokenResponse(issuer.issue(req.subject(), req.admin()), "Bearer", issuer.ttlSeconds());
+        return new TokenResponse(issuer.issue(req.subject(), Boolean.TRUE.equals(req.admin())), "Bearer", issuer.ttlSeconds());
     }
 }

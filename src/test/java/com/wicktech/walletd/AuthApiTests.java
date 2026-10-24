@@ -192,5 +192,11 @@ class AuthApiTests {
         var dave = new TestApi(port, (String) r.body().get("token"));
         assertThat(dave.call("POST", "/accounts", Map.of("currency", "INR")).body().get("ownerRef"))
                 .isEqualTo("dave");
+
+        // "admin" may be left out: that means a plain user (and the docs' examples do exactly that)
+        var plain = anonymous.call("POST", "/dev/token", Map.of("subject", "erin"));
+        assertThat(plain.status()).isEqualTo(200);
+        var erin = new TestApi(port, (String) plain.body().get("token"));
+        assertThat(erin.call("GET", "/admin/reconciliation", null).status()).isEqualTo(403);
     }
 }
