@@ -7,7 +7,7 @@
 
 A double-entry wallet and payments service. Every money movement is a journal entry whose postings sum to zero. The database itself enforces that, so a bug in the service can't create or destroy money.
 
-> **Status: step 4 of 8.** Ledger schema and invariants, the account / top-up / transfer API, concurrency tests and idempotent requests are done (see [Roadmap](#roadmap)).
+> **Status: step 5 of 8.** Ledger schema and invariants, the account / top-up / transfer API, concurrency tests, idempotent requests and JWT auth with OpenAPI docs are done (see [Roadmap](#roadmap)).
 
 ## Ledger invariants (enforced in Postgres)
 
@@ -23,7 +23,7 @@ Each invariant has a test in [`LedgerSchemaTests`](src/test/java/com/wicktech/wa
 
 ## API
 
-Amounts are integer minor units (`10000` = ₹100.00). Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`.
+Amounts are integer minor units (`10000` = ₹100.00). Errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`, including `401` and `403`. Interactive docs: **`/docs`** (Swagger UI), spec at `/v3/api-docs`.
 
 | Method | Path | Does |
 |---|---|---|
@@ -33,6 +33,21 @@ Amounts are integer minor units (`10000` = ₹100.00). Errors are [RFC 9457](htt
 | `POST` | `/accounts/{id}/top-ups` | Credit from the gateway account: `{"amountMinor": 10000}`. Needs `Idempotency-Key` |
 | `POST` | `/transfers` | `{"fromAccountId", "toAccountId", "amountMinor", "reference"}` → 201 journal entry; 422 for insufficient funds, same account or currency mismatch. Needs `Idempotency-Key` |
 | `GET` | `/journal-entries/{id}` | An entry with its postings |
+
+## Authentication and who may do what
+
+walletd is a resource server: every request except `/actuator/health`, the docs and the webhook needs `Authorization: Bearer <JWT>` (HS256, signed with `WALLETD_JWT_SECRET`, `iss` = `walletd`, roles in the `roles` claim). It stores no passwords: tokens come from your identity provider.
+
+| Rule | Detail |
+|---|---|
+| A wallet belongs to the token's `sub` | `POST /accounts` opens one for you; naming another owner needs ADMIN (`403` otherwise) |
+| Others' wallets don't exist for you | Reading, listing postings or spending from a wallet you don't own returns `404`, so ids can't be probed |
+| Transfers start from your wallet | Any wallet can receive |
+| Top-ups are ADMIN only | Otherwise anyone could mint money; in production the payment webhook does this (step 6) |
+| Idempotency keys are per caller | Two users can use the same key without colliding |
+| Bad, expired, wrong-issuer or wrongly-signed token | `401` |
+
+For local demos, `WALLETD_DEV_TOKENS=true` enables `POST /dev/token`, which mints a token for any subject. **It must stay off in production.** The app refuses to start without a secret of at least 32 characters.
 
 ## Idempotent requests
 
@@ -50,13 +65,21 @@ Amounts are integer minor units (`10000` = ₹100.00). Errors are [RFC 9457](htt
 How it works: the key row is claimed, the ledger is updated and the response is stored **in one database transaction**, so a crash can't leave "paid but not recorded" or the reverse. A parallel request blocks on the key's unique index until the first one commits or rolls back.
 
 ```bash
-A=$(curl -s localhost:8080/accounts -H 'content-type: application/json' -d '{"ownerRef":"asha","currency":"INR"}' | jq -r .id)
-B=$(curl -s localhost:8080/accounts -H 'content-type: application/json' -d '{"ownerRef":"ravi","currency":"INR"}' | jq -r .id)
-curl -s localhost:8080/accounts/$A/top-ups -H 'content-type: application/json' \
+export WALLETD_JWT_SECRET=$(openssl rand -hex 32)
+WALLETD_DEV_TOKENS=true ./mvnw spring-boot:run &      # see "Run locally"
+
+tok() { curl -s localhost:8080/dev/token -H 'content-type: application/json' -d "$1" | jq -r .token; }
+OPS=$(tok '{"subject":"ops","admin":true}'); ASHA=$(tok '{"subject":"asha"}'); RAVI=$(tok '{"subject":"ravi"}')
+
+open() { curl -s localhost:8080/accounts -H "Authorization: Bearer $1" -H 'content-type: application/json' -d '{"currency":"INR"}' | jq -r .id; }
+A=$(open $ASHA); B=$(open $RAVI)
+
+curl -s localhost:8080/accounts/$A/top-ups -H "Authorization: Bearer $OPS" -H 'content-type: application/json' \
   -H "Idempotency-Key: $(uuidgen)" -d '{"amountMinor":10000}'
-curl -s localhost:8080/transfers -H 'content-type: application/json' \
+curl -s localhost:8080/transfers -H "Authorization: Bearer $ASHA" -H 'content-type: application/json' \
   -H "Idempotency-Key: $(uuidgen)" \
   -d "{\"fromAccountId\":\"$A\",\"toAccountId\":\"$B\",\"amountMinor\":2500}"
+curl -s localhost:8080/accounts/$B -H "Authorization: Bearer $RAVI"      # balanceMinor: 2500
 ```
 
 ## Concurrency
@@ -81,8 +104,10 @@ Migrations: [`src/main/resources/db/migration`](src/main/resources/db/migration)
 ## Run locally
 
 ```bash
-docker compose up -d          # Postgres 17 on :5432
-./mvnw spring-boot:run        # http://localhost:8080/actuator/health
+docker compose up -d                                  # Postgres 17 on :5432
+export WALLETD_JWT_SECRET=$(openssl rand -hex 32)     # at least 32 characters, required
+WALLETD_DEV_TOKENS=true ./mvnw spring-boot:run        # local demos only: enables POST /dev/token
+# health: http://localhost:8080/actuator/health   docs: http://localhost:8080/docs
 ```
 
 ## Test
@@ -99,7 +124,7 @@ Both paths apply the same Flyway migrations as production. CI runs both. The sui
 
 ## Stack
 
-Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator) · PostgreSQL 17 · Flyway · JUnit 5 + AssertJ · Testcontainers · GitHub Actions
+Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator, Security resource server) · springdoc OpenAPI · PostgreSQL 17 · Flyway · JUnit 5 + AssertJ · Testcontainers · GitHub Actions
 
 ## Roadmap
 
@@ -107,7 +132,7 @@ Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator) · PostgreS
 2. ✅ Accounts, top-ups and transfers (double-entry postings in one transaction, ordered row locks)
 3. ✅ Testcontainers run in CI; randomized concurrency test
 4. ✅ `Idempotency-Key` support (replay → same response, different body → 422)
-5. JWT auth, OpenAPI docs, RFC 7807 errors
+5. ✅ JWT auth, ownership rules, OpenAPI docs, RFC 9457 errors
 6. Razorpay-style HMAC webhook; outbox poller
 7. Nightly reconciliation job, Prometheus metrics, Dockerfile, deploy
 8. Architecture diagram and curl walkthrough
