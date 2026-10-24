@@ -134,7 +134,8 @@ resource "aws_security_group" "db" {
 }
 
 # Load balancer: web traffic in from anywhere, only to the containers out.
-# trivy:ignore:AVD-AWS-0107 -- this is the public entry point; everything behind it is locked to security groups.
+# Accepted: this is the public entry point; everything behind it is locked to security groups.
+#trivy:ignore:AVD-AWS-0107
 resource "aws_vpc_security_group_ingress_rule" "alb_http" {
   security_group_id = aws_security_group.alb.id
   description       = "HTTP from the internet (redirects to HTTPS when a certificate is set)"
@@ -144,7 +145,8 @@ resource "aws_vpc_security_group_ingress_rule" "alb_http" {
   to_port           = 80
 }
 
-# trivy:ignore:AVD-AWS-0107 -- public HTTPS entry point (see above).
+# Accepted: public HTTPS entry point (see above).
+#trivy:ignore:AVD-AWS-0107
 resource "aws_vpc_security_group_ingress_rule" "alb_https" {
   security_group_id = aws_security_group.alb.id
   description       = "HTTPS from the internet"
@@ -182,7 +184,8 @@ resource "aws_vpc_security_group_egress_rule" "ecs_to_db" {
   to_port                      = 5432
 }
 
-# trivy:ignore:AVD-AWS-0104 -- the containers must reach AWS APIs (ECR, Secrets Manager, CloudWatch) over HTTPS.
+# Accepted: the containers must reach AWS APIs (ECR, Secrets Manager, CloudWatch) over HTTPS.
+#trivy:ignore:AVD-AWS-0104
 resource "aws_vpc_security_group_egress_rule" "ecs_https" {
   security_group_id = aws_security_group.ecs.id
   description       = "HTTPS to AWS APIs (image pull, secrets, logs)"
