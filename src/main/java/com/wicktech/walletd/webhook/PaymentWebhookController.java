@@ -3,6 +3,7 @@ package com.wicktech.walletd.webhook;
 import com.wicktech.walletd.idempotency.IdempotencyService;
 import com.wicktech.walletd.ledger.LedgerException;
 import com.wicktech.walletd.ledger.LedgerService;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import jakarta.validation.Validator;
@@ -36,9 +37,11 @@ class PaymentWebhookController {
     private final Validator validator;
     private final IdempotencyService idempotency;
     private final LedgerService ledger;
+    private final MeterRegistry metrics;
 
     PaymentWebhookController(SignatureVerifier verifier, JsonMapper mapper, Validator validator,
-            IdempotencyService idempotency, LedgerService ledger) {
+            IdempotencyService idempotency, LedgerService ledger, MeterRegistry metrics) {
+        this.metrics = metrics;
         this.verifier = verifier;
         this.mapper = mapper;
         this.validator = validator;
@@ -69,6 +72,7 @@ class PaymentWebhookController {
                     .map(v -> v.getPropertyPath() + " " + v.getMessage()).sorted().collect(Collectors.joining("; ")));
         }
         if (!"payment.captured".equals(event.type())) {
+            metrics.counter("walletd.webhook.deliveries", "result", "ignored").increment();
             return new Ack("ignored", null); // acknowledged so the provider stops retrying
         }
 
@@ -77,7 +81,9 @@ class PaymentWebhookController {
                 idempotency.fingerprint("payment.captured", new Object[] {event.accountId(), event.amountMinor(),
                         event.currency()}),
                 UUID.class, () -> credit(event));
-        return new Ack(result.replayed() ? "duplicate" : "credited", result.body());
+        var outcome = result.replayed() ? "duplicate" : "credited";
+        metrics.counter("walletd.webhook.deliveries", "result", outcome).increment();
+        return new Ack(outcome, result.body());
     }
 
     private UUID credit(PaymentEvent event) {

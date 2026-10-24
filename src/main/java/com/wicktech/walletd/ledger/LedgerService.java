@@ -5,12 +5,15 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.dao.ConcurrencyFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -36,9 +39,11 @@ public class LedgerService {
     private final OutboxRepository outbox;
     private final TransactionTemplate tx;
     private final TransactionTemplate readOnly;
+    private final MeterRegistry metrics;
 
     public LedgerService(AccountRepository accounts, JournalEntryRepository entries, PostingRepository postings,
-            OutboxRepository outbox, PlatformTransactionManager txManager) {
+            OutboxRepository outbox, PlatformTransactionManager txManager, MeterRegistry metrics) {
+        this.metrics = metrics;
         this.accounts = accounts;
         this.entries = entries;
         this.postings = postings;
@@ -132,8 +137,19 @@ public class LedgerService {
                     "{\"entryId\":\"%s\",\"kind\":\"%s\",\"currency\":\"%s\",\"amountMinor\":%d,"
                             + "\"debitAccountId\":\"%s\",\"creditAccountId\":\"%s\"}",
                     entry.getId(), kind, entry.getCurrency(), amountMinor, debitId, creditId)));
+            countAfterCommit(kind);
             return new Posted(entry, legs);
         }));
+    }
+
+    /** Counts only entries that really committed (the surrounding transaction may still roll back). */
+    private void countAfterCommit(JournalKind kind) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                metrics.counter("walletd.ledger.entries", "kind", kind.name()).increment();
+            }
+        });
     }
 
     private Account lock(UUID id) {

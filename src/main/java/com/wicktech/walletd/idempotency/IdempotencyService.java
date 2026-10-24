@@ -1,6 +1,7 @@
 package com.wicktech.walletd.idempotency;
 
 import com.wicktech.walletd.ledger.LedgerService;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -36,9 +37,11 @@ public class IdempotencyService {
     private final JsonMapper mapper;
     private final LedgerService ledger;
     private final TransactionTemplate tx;
+    private final MeterRegistry metrics;
 
     public IdempotencyService(JdbcTemplate jdbc, JsonMapper mapper, LedgerService ledger,
-            PlatformTransactionManager txManager) {
+            PlatformTransactionManager txManager, MeterRegistry metrics) {
+        this.metrics = metrics;
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.ledger = ledger;
@@ -84,6 +87,7 @@ public class IdempotencyService {
             if (stored.responseBody() == null) {
                 throw new IdempotencyException.InProgress();
             }
+            metrics.counter("walletd.idempotency.replays").increment();
             return new Result<>(mapper.readValue(stored.responseBody(), type), true);
         }
 
