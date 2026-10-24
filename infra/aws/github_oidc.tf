@@ -42,8 +42,8 @@ resource "aws_iam_role" "deploy" {
   assume_role_policy = data.aws_iam_policy_document.deploy_assume.json
 }
 
-# trivy:ignore:AVD-AWS-0057 -- AWS has no resource-level permissions for ecr:GetAuthorizationToken or ecs:RegisterTaskDefinition,
-# everything else is limited to this repository, service and roles.
+# Accepted: AWS has no resource-level permissions for ecr:GetAuthorizationToken or ecs:RegisterTaskDefinition, everything else is limited to this repository, service and roles.
+#trivy:ignore:AVD-AWS-0057
 data "aws_iam_policy_document" "deploy" {
   statement {
     sid       = "EcrLogin"

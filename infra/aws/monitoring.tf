@@ -1,7 +1,7 @@
 # Alarms for the things that page a person. Without alarm_email they only show up in the console.
 
-# trivy:ignore:AVD-AWS-0095 -- CloudWatch alarms cannot publish to a topic encrypted with an AWS-managed key, and a
-# customer-managed key would add cost and complexity. The topic only carries alarm names, never customer data.
+# Accepted: CloudWatch alarms cannot publish to a topic encrypted with an AWS-managed key, and a customer-managed key would add cost and complexity. The topic only carries alarm names, never customer data.
+#trivy:ignore:AVD-AWS-0095
 resource "aws_sns_topic" "alarms" {
   count = var.alarm_email != "" ? 1 : 0
   name  = "${local.name}-alarms"

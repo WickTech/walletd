@@ -1,4 +1,5 @@
-# trivy:ignore:AVD-AWS-0053 -- the service is an internet-facing API on purpose.
+# Accepted: the service is an internet-facing API on purpose.
+#trivy:ignore:AVD-AWS-0053
 resource "aws_lb" "main" {
   name               = local.name
   load_balancer_type = "application"
@@ -33,8 +34,8 @@ locals {
 }
 
 # With a certificate, port 80 only redirects. Without one, port 80 serves the app (demo only).
-# trivy:ignore:AVD-AWS-0054 -- with a certificate this listener only redirects to HTTPS; without one it serves the
-# demo over HTTP (documented, and the README says to set acm_certificate_arn before real use).
+# Accepted: with a certificate this listener only redirects to HTTPS; without one it serves the demo over HTTP (documented, and the README says to set acm_certificate_arn before real use).
+#trivy:ignore:AVD-AWS-0054
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
