@@ -15,9 +15,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
-import org.springframework.http.MediaType;
+import com.wicktech.walletd.TestApi.Res;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.web.client.RestClient;
 
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
 @Import(TestDatabaseConfig.class)
@@ -29,26 +28,15 @@ class LedgerApiTests {
     @Autowired
     JdbcTemplate jdbc;
 
-    RestClient http;
-
-    record Res(int status, Map<?, ?> body) {
-    }
+    TestApi api;
 
     @BeforeEach
     void client() {
-        http = RestClient.create("http://localhost:" + port);
+        api = new TestApi(port);
     }
 
     private Res call(String method, String path, Object body) {
-        var spec = http.method(org.springframework.http.HttpMethod.valueOf(method)).uri(path);
-        if (body != null) {
-            spec = spec.contentType(MediaType.APPLICATION_JSON).body(body);
-        }
-        return spec.exchange((req, res) -> {
-            var text = new String(res.getBody().readAllBytes());
-            Map<?, ?> parsed = text.startsWith("{") ? new tools.jackson.databind.ObjectMapper().readValue(text, Map.class) : Map.of();
-            return new Res(res.getStatusCode().value(), parsed);
-        });
+        return api.call(method, path, body);
     }
 
     private String open(String currency) {
@@ -61,12 +49,18 @@ class LedgerApiTests {
         return ((Number) call("GET", "/accounts/" + id, null).body().get("balanceMinor")).longValue();
     }
 
+    private static Map<String, String> freshKey() {
+        return Map.of("Idempotency-Key", UUID.randomUUID().toString());
+    }
+
     private Res topUp(String id, long amount) {
-        return call("POST", "/accounts/" + id + "/top-ups", Map.of("amountMinor", amount, "reference", "test"));
+        return api.call("POST", "/accounts/" + id + "/top-ups",
+                Map.of("amountMinor", amount, "reference", "test"), freshKey());
     }
 
     private Res transfer(String from, String to, long amount) {
-        return call("POST", "/transfers", Map.of("fromAccountId", from, "toAccountId", to, "amountMinor", amount));
+        return api.call("POST", "/transfers",
+                Map.of("fromAccountId", from, "toAccountId", to, "amountMinor", amount), freshKey());
     }
 
     @Test

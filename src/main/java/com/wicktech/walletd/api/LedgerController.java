@@ -6,6 +6,7 @@ import com.wicktech.walletd.api.Dtos.OpenAccountRequest;
 import com.wicktech.walletd.api.Dtos.PostingResponse;
 import com.wicktech.walletd.api.Dtos.TopUpRequest;
 import com.wicktech.walletd.api.Dtos.TransferRequest;
+import com.wicktech.walletd.idempotency.IdempotencyService;
 import com.wicktech.walletd.ledger.LedgerService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -14,6 +15,7 @@ import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -26,10 +28,17 @@ import org.springframework.web.bind.annotation.RestController;
 @Validated
 class LedgerController {
 
-    private final LedgerService ledger;
+    static final String IDEMPOTENCY_KEY = "Idempotency-Key";
+    static final String REPLAYED = "Idempotent-Replayed";
+    /** Callers are not authenticated yet; step 5 replaces this with the token's subject. */
+    private static final String SCOPE = "public";
 
-    LedgerController(LedgerService ledger) {
+    private final LedgerService ledger;
+    private final IdempotencyService idempotency;
+
+    LedgerController(LedgerService ledger, IdempotencyService idempotency) {
         this.ledger = ledger;
+        this.idempotency = idempotency;
     }
 
     @PostMapping("/accounts")
@@ -50,13 +59,24 @@ class LedgerController {
     }
 
     @PostMapping("/accounts/{id}/top-ups")
-    ResponseEntity<EntryResponse> topUp(@PathVariable UUID id, @Valid @RequestBody TopUpRequest req) {
-        return created(ledger.topUp(id, req.amountMinor(), req.reference()));
+    ResponseEntity<EntryResponse> topUp(@PathVariable UUID id, @Valid @RequestBody TopUpRequest req,
+            @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String keyHeader) {
+        var key = idempotency.requireKey(keyHeader);
+        var result = idempotency.execute(SCOPE, key,
+                idempotency.fingerprint("POST /accounts/" + id + "/top-ups", req), EntryResponse.class,
+                () -> EntryResponse.of(ledger.topUpInTx(id, req.amountMinor(), req.reference())));
+        return created(result);
     }
 
     @PostMapping("/transfers")
-    ResponseEntity<EntryResponse> transfer(@Valid @RequestBody TransferRequest req) {
-        return created(ledger.transfer(req.fromAccountId(), req.toAccountId(), req.amountMinor(), req.reference()));
+    ResponseEntity<EntryResponse> transfer(@Valid @RequestBody TransferRequest req,
+            @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String keyHeader) {
+        var key = idempotency.requireKey(keyHeader);
+        var result = idempotency.execute(SCOPE, key, idempotency.fingerprint("POST /transfers", req),
+                EntryResponse.class, () -> EntryResponse.of(
+                        ledger.transferInTx(req.fromAccountId(), req.toAccountId(), req.amountMinor(),
+                                req.reference())));
+        return created(result);
     }
 
     @GetMapping("/journal-entries/{id}")
@@ -65,8 +85,11 @@ class LedgerController {
         return posted == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(EntryResponse.of(posted));
     }
 
-    private static ResponseEntity<EntryResponse> created(LedgerService.Posted posted) {
-        return ResponseEntity.created(URI.create("/journal-entries/" + posted.entry().getId()))
-                .body(EntryResponse.of(posted));
+    private static ResponseEntity<EntryResponse> created(IdempotencyService.Result<EntryResponse> result) {
+        var builder = ResponseEntity.created(URI.create("/journal-entries/" + result.body().id()));
+        if (result.replayed()) {
+            builder.header(REPLAYED, "true");
+        }
+        return builder.body(result.body());
     }
 }
