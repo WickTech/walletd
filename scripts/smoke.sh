@@ -34,8 +34,10 @@ echo "2. top-up (admin only) and its idempotent retry"
 KEY=$(uuid)
 topup() { curl -sS -D - -o /dev/null "$BASE/accounts/$A/top-ups" -H "Authorization: Bearer $OPS" \
   -H 'content-type: application/json' -H "Idempotency-Key: $KEY" -d '{"amountMinor":10000}'; }
-topup | grep -qi '^HTTP/.* 201' || fail "first top-up should be 201"
-topup | grep -qi '^idempotent-replayed: true' || fail "retry should be flagged as a replay"
+# Capture first, then grep: "cmd | grep -q" can fail under pipefail when grep exits early (SIGPIPE).
+FIRST=$(topup); RETRY=$(topup)
+grep -qi '^HTTP/.* 201' <<<"$FIRST" || fail "first top-up should be 201"
+grep -qi '^idempotent-replayed: true' <<<"$RETRY" || fail "retry should be flagged as a replay"
 expect "balance after top-up + retry" "$(balance "$A" "$ASHA")" 10000
 expect "a user cannot mint money" "$(status "$BASE/accounts/$A/top-ups" -H "Authorization: Bearer $ASHA" \
   -H 'content-type: application/json' -H "Idempotency-Key: $(uuid)" -d '{"amountMinor":1}')" 403
@@ -70,8 +72,8 @@ expect "receiver after webhook" "$(balance "$B" "$RAVI")" 7500
 echo "5. audit and metrics"
 expect "ledger audit" "$(curl -fsS "$BASE/admin/reconciliation" -H "Authorization: Bearer $OPS" | jq -r .ok)" true
 expect "audit is admin-only" "$(status "$BASE/admin/reconciliation" -H "Authorization: Bearer $ASHA")" 403
-curl -fsS "$BASE/actuator/prometheus" -H "Authorization: Bearer $OPS" | grep -q '^walletd_ledger_entries_total' \
-  || fail "metrics missing walletd_ledger_entries_total"
+METRICS=$(curl -fsS "$BASE/actuator/prometheus" -H "Authorization: Bearer $OPS")
+grep -q '^walletd_ledger_entries_total' <<<"$METRICS" || fail "metrics missing walletd_ledger_entries_total"
 curl -fsS "$BASE/v3/api-docs" | jq -e '.paths["/transfers"]' >/dev/null || fail "OpenAPI spec missing /transfers"
 
 echo "smoke test passed"
