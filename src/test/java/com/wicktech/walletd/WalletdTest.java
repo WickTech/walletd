@@ -16,7 +16,9 @@ import org.springframework.context.annotation.Import;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "walletd.security.jwt-secret=test-secret-test-secret-test-secret-0123456789",
         "walletd.security.dev-token-endpoint=true",
+        "walletd.webhook.secret=webhook-secret-webhook-secret-0123456789",
+        "walletd.scheduling.enabled=false", // tests call the jobs themselves
 })
-@Import(TestDatabaseConfig.class)
+@Import({TestDatabaseConfig.class, RecordingPublisherConfig.class})
 @interface WalletdTest {
 }
