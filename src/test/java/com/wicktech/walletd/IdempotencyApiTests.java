@@ -11,15 +11,12 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import com.wicktech.walletd.security.TokenIssuer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
-@Import(TestDatabaseConfig.class)
+@WalletdTest
 class IdempotencyApiTests {
 
     @LocalServerPort
@@ -28,11 +25,14 @@ class IdempotencyApiTests {
     @Autowired
     JdbcTemplate jdbc;
 
+    @Autowired
+    TokenIssuer tokens;
+
     TestApi api;
 
     @BeforeEach
     void client() {
-        api = new TestApi(port);
+        api = new TestApi(port, tokens.issue("admin", true));
     }
 
     private String open() {

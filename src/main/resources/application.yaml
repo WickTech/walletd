@@ -28,3 +28,14 @@ management:
     health:
       probes:
         enabled: true
+
+walletd:
+  security:
+    jwt-secret: ${WALLETD_JWT_SECRET:}          # required: at least 32 characters
+    dev-token-endpoint: ${WALLETD_DEV_TOKENS:false}   # POST /dev/token; local demos only
+    issuer: walletd
+    token-ttl: 1h
+
+springdoc:
+  swagger-ui:
+    path: /docs

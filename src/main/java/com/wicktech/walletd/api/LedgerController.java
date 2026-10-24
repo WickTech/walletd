@@ -8,6 +8,10 @@ import com.wicktech.walletd.api.Dtos.TopUpRequest;
 import com.wicktech.walletd.api.Dtos.TransferRequest;
 import com.wicktech.walletd.idempotency.IdempotencyService;
 import com.wicktech.walletd.ledger.LedgerService;
+import com.wicktech.walletd.security.Caller;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import org.springframework.security.core.Authentication;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -30,49 +34,60 @@ class LedgerController {
 
     static final String IDEMPOTENCY_KEY = "Idempotency-Key";
     static final String REPLAYED = "Idempotent-Replayed";
-    /** Callers are not authenticated yet; step 5 replaces this with the token's subject. */
-    private static final String SCOPE = "public";
-
     private final LedgerService ledger;
     private final IdempotencyService idempotency;
+    private final AccessPolicy access;
 
-    LedgerController(LedgerService ledger, IdempotencyService idempotency) {
+    LedgerController(LedgerService ledger, IdempotencyService idempotency, AccessPolicy access) {
         this.ledger = ledger;
         this.idempotency = idempotency;
+        this.access = access;
     }
 
     @PostMapping("/accounts")
-    ResponseEntity<AccountResponse> open(@Valid @RequestBody OpenAccountRequest req) {
-        var account = ledger.openAccount(req.ownerRef(), req.currency());
+    @Operation(summary = "Open a wallet (for yourself; admins may name another owner)")
+    ResponseEntity<AccountResponse> open(@Valid @RequestBody OpenAccountRequest req, Authentication auth) {
+        var owner = access.ownerForNewAccount(Caller.of(auth), req.ownerRef());
+        var account = ledger.openAccount(owner, req.currency());
         return ResponseEntity.created(URI.create("/accounts/" + account.getId())).body(AccountResponse.of(account));
     }
 
     @GetMapping("/accounts/{id}")
-    AccountResponse get(@PathVariable UUID id) {
-        return AccountResponse.of(ledger.account(id));
+    @Operation(summary = "Balance and details of one of your wallets")
+    AccountResponse get(@PathVariable UUID id, Authentication auth) {
+        return AccountResponse.of(access.ownedAccount(Caller.of(auth), id));
     }
 
     @GetMapping("/accounts/{id}/postings")
+    @Operation(summary = "Ledger history of one of your wallets, newest first")
     List<PostingResponse> history(@PathVariable UUID id,
-            @RequestParam(defaultValue = "50") @Min(1) @Max(500) int limit) {
+            @RequestParam(defaultValue = "50") @Min(1) @Max(500) int limit, Authentication auth) {
+        access.ownedAccount(Caller.of(auth), id);
         return ledger.history(id, limit).stream().map(PostingResponse::of).toList();
     }
 
     @PostMapping("/accounts/{id}/top-ups")
+    @Operation(summary = "Credit a wallet from the payment gateway account (ADMIN only)")
     ResponseEntity<EntryResponse> topUp(@PathVariable UUID id, @Valid @RequestBody TopUpRequest req,
-            @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String keyHeader) {
+            @Parameter(required = true, description = "Unique per logical request, e.g. a UUID")
+            @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String keyHeader, Authentication auth) {
+        var caller = Caller.of(auth);
         var key = idempotency.requireKey(keyHeader);
-        var result = idempotency.execute(SCOPE, key,
+        var result = idempotency.execute(caller.subject(), key,
                 idempotency.fingerprint("POST /accounts/" + id + "/top-ups", req), EntryResponse.class,
                 () -> EntryResponse.of(ledger.topUpInTx(id, req.amountMinor(), req.reference())));
         return created(result);
     }
 
     @PostMapping("/transfers")
+    @Operation(summary = "Move money from one of your wallets to any wallet")
     ResponseEntity<EntryResponse> transfer(@Valid @RequestBody TransferRequest req,
-            @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String keyHeader) {
+            @Parameter(required = true, description = "Unique per logical request, e.g. a UUID")
+            @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String keyHeader, Authentication auth) {
+        var caller = Caller.of(auth);
         var key = idempotency.requireKey(keyHeader);
-        var result = idempotency.execute(SCOPE, key, idempotency.fingerprint("POST /transfers", req),
+        access.ownedAccount(caller, req.fromAccountId()); // the source must be yours (404 otherwise)
+        var result = idempotency.execute(caller.subject(), key, idempotency.fingerprint("POST /transfers", req),
                 EntryResponse.class, () -> EntryResponse.of(
                         ledger.transferInTx(req.fromAccountId(), req.toAccountId(), req.amountMinor(),
                                 req.reference())));
@@ -80,9 +95,13 @@ class LedgerController {
     }
 
     @GetMapping("/journal-entries/{id}")
-    ResponseEntity<EntryResponse> entry(@PathVariable UUID id) {
+    @Operation(summary = "A journal entry with its postings, if it touches one of your wallets")
+    ResponseEntity<EntryResponse> entry(@PathVariable UUID id, Authentication auth) {
         var posted = ledger.entry(id);
-        return posted == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(EntryResponse.of(posted));
+        var caller = Caller.of(auth);
+        boolean visible = posted != null && (caller.admin() || posted.postings().stream().anyMatch(
+                p -> ledger.account(p.getAccountId()).getOwnerRef().equals(caller.subject())));
+        return visible ? ResponseEntity.ok(EntryResponse.of(posted)) : ResponseEntity.notFound().build();
     }
 
     private static ResponseEntity<EntryResponse> created(IdempotencyService.Result<EntryResponse> result) {

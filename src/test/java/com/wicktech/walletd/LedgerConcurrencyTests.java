@@ -12,8 +12,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.RepeatedTest;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
@@ -21,8 +19,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * ledger must stay conserved, wallets non-negative, and every stored balance
  * equal to the sum of its postings.
  */
-@SpringBootTest
-@Import(TestDatabaseConfig.class)
+@WalletdTest
 class LedgerConcurrencyTests {
 
     private static final int ACCOUNTS = 6;

@@ -16,9 +16,17 @@ final class TestApi {
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
     private final RestClient http;
+    private final String token;
 
+    /** Anonymous client. */
     TestApi(int port) {
+        this(port, null);
+    }
+
+    /** Client that sends {@code Authorization: Bearer <token>}. */
+    TestApi(int port, String token) {
         this.http = RestClient.create("http://localhost:" + port);
+        this.token = token;
     }
 
     Res call(String method, String path, Object body) {
@@ -27,6 +35,9 @@ final class TestApi {
 
     Res call(String method, String path, Object body, Map<String, String> headers) {
         var spec = http.method(HttpMethod.valueOf(method)).uri(path);
+        if (token != null) {
+            spec = spec.header("Authorization", "Bearer " + token);
+        }
         for (var h : headers.entrySet()) {
             spec = spec.header(h.getKey(), h.getValue());
         }

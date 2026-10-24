@@ -5,7 +5,6 @@ import com.wicktech.walletd.ledger.AccountType;
 import com.wicktech.walletd.ledger.JournalKind;
 import com.wicktech.walletd.ledger.LedgerService;
 import com.wicktech.walletd.ledger.Posting;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
@@ -20,8 +19,9 @@ final class Dtos {
     private Dtos() {
     }
 
+    /** {@code ownerRef} may be omitted: it then defaults to the caller's token subject. */
     record OpenAccountRequest(
-            @NotBlank @Size(max = 100) String ownerRef,
+            @Size(min = 1, max = 100) String ownerRef,
             @NotNull @Pattern(regexp = "^[A-Z]{3}$", message = "must be an ISO 4217 code like INR") String currency) {
     }
 
