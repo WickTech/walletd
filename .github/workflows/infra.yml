@@ -1,0 +1,51 @@
+name: Infrastructure
+
+# Checks the OpenTofu code in infra/aws without needing an AWS account: formatting, validation, lint and a
+# security scan. Everything here is free and open source (OpenTofu, TFLint, Trivy).
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/**", ".github/workflows/infra.yml"]
+  pull_request:
+    paths: ["infra/**", ".github/workflows/infra.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Format, validate, lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/aws
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: 1.13.2
+      - name: Format
+        run: tofu fmt -check -recursive -diff
+      - name: Init (no backend, no credentials)
+        run: tofu init -backend=false -input=false
+      - name: Validate
+        run: tofu validate
+      - uses: terraform-linters/setup-tflint@v6
+      - name: Lint
+        run: |
+          tflint --init
+          tflint --format compact
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy config scan (fails on HIGH or CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: infra/aws
+          severity: HIGH,CRITICAL
+          exit-code: "1"

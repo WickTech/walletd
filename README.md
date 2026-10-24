@@ -194,12 +194,12 @@ Bugs the tests caught while building this are in the commit history (for example
 - **Outbox order is only guaranteed with one relay.** With several instances, consumers must not rely on order (they must already de-duplicate).
 - **The audit scans everything.** Fine for millions of rows once a night; at larger scale it would be incremental or run on a replica.
 - **No rate limiting and only a `limit` on the postings list** (no cursor).
-- **Not deployed.** The next step is the same service on AWS (ECS and RDS) with Terraform.
+- **Not deployed anywhere yet.** [`infra/`](infra/README.md) holds a full AWS setup (ECS Fargate, RDS, load balancer, Secrets Manager, keyless GitHub deploys) written with OpenTofu. It is formatted, validated, linted and security-scanned in CI, but I have not run it on a live AWS account, so treat it as reviewed code rather than a proven deployment.
 
 ## Stack
 
-Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator, Security resource server) · springdoc OpenAPI · PostgreSQL 17 · Flyway · Micrometer and Prometheus · JUnit 5, AssertJ and Testcontainers · Docker · GitHub Actions
+Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator, Security resource server) · springdoc OpenAPI · PostgreSQL 17 · Flyway · Micrometer and Prometheus · JUnit 5, AssertJ and Testcontainers · Docker · OpenTofu (AWS) · GitHub Actions
 
 ## License
 
-MIT
+MIT. Free and open source: building, testing and reading it needs no paid tool or account (GitHub Actions on a public repository, Docker images of PostgreSQL and Temurin, OpenTofu, Trivy). Only running the AWS setup costs money, and `tofu destroy` removes it.
