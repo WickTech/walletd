@@ -1,5 +1,6 @@
 package com.wicktech.walletd.api;
 
+import com.wicktech.walletd.idempotency.IdempotencyException;
 import com.wicktech.walletd.ledger.LedgerException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -19,6 +20,19 @@ class ApiExceptionHandler {
             case LedgerException.InsufficientFunds ignored -> HttpStatus.UNPROCESSABLE_CONTENT;
             case LedgerException.InvalidTransfer ignored -> HttpStatus.UNPROCESSABLE_CONTENT;
             default -> HttpStatus.UNPROCESSABLE_CONTENT;
+        };
+        var problem = ProblemDetail.forStatusAndDetail(status, e.getMessage());
+        problem.setTitle(e.getClass().getSimpleName().replaceAll("([a-z])([A-Z])", "$1 $2"));
+        return problem;
+    }
+
+    @ExceptionHandler(IdempotencyException.class)
+    ProblemDetail idempotency(IdempotencyException e) {
+        var status = switch (e) {
+            case IdempotencyException.MissingKey ignored -> HttpStatus.BAD_REQUEST;
+            case IdempotencyException.InvalidKey ignored -> HttpStatus.BAD_REQUEST;
+            case IdempotencyException.KeyReused ignored -> HttpStatus.UNPROCESSABLE_CONTENT;
+            case IdempotencyException.InProgress ignored -> HttpStatus.CONFLICT;
         };
         var problem = ProblemDetail.forStatusAndDetail(status, e.getMessage());
         problem.setTitle(e.getClass().getSimpleName().replaceAll("([a-z])([A-Z])", "$1 $2"));

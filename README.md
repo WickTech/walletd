@@ -7,7 +7,7 @@
 
 A double-entry wallet and payments service. Every money movement is a journal entry whose postings sum to zero. The database itself enforces that, so a bug in the service can't create or destroy money.
 
-> **Status: step 3 of 8.** The ledger schema and invariants, the account / top-up / transfer API, and the concurrency tests are done (see [Roadmap](#roadmap)).
+> **Status: step 4 of 8.** Ledger schema and invariants, the account / top-up / transfer API, concurrency tests and idempotent requests are done (see [Roadmap](#roadmap)).
 
 ## Ledger invariants (enforced in Postgres)
 
@@ -30,15 +30,32 @@ Amounts are integer minor units (`10000` = ₹100.00). Errors are [RFC 9457](htt
 | `POST` | `/accounts` | Open a wallet: `{"ownerRef": "asha", "currency": "INR"}` → 201 (409 if that owner already has one) |
 | `GET` | `/accounts/{id}` | Balance and details |
 | `GET` | `/accounts/{id}/postings?limit=50` | Ledger history, newest first |
-| `POST` | `/accounts/{id}/top-ups` | Credit from the gateway account: `{"amountMinor": 10000}` |
-| `POST` | `/transfers` | `{"fromAccountId", "toAccountId", "amountMinor", "reference"}` → 201 journal entry; 422 for insufficient funds, same account or currency mismatch |
+| `POST` | `/accounts/{id}/top-ups` | Credit from the gateway account: `{"amountMinor": 10000}`. Needs `Idempotency-Key` |
+| `POST` | `/transfers` | `{"fromAccountId", "toAccountId", "amountMinor", "reference"}` → 201 journal entry; 422 for insufficient funds, same account or currency mismatch. Needs `Idempotency-Key` |
 | `GET` | `/journal-entries/{id}` | An entry with its postings |
+
+## Idempotent requests
+
+`POST /transfers` and `POST /accounts/{id}/top-ups` require an `Idempotency-Key` header (1–255 printable ASCII characters, e.g. a UUID). A client that times out can safely retry:
+
+| Situation | Result |
+|---|---|
+| First request | Runs once; `201` |
+| Same key, same body | The stored response again, plus `Idempotent-Replayed: true`. No second money movement |
+| Same key, different body or endpoint | `422` |
+| Same key sent in parallel | One runs; the others wait for it and get its response (tested with 20 parallel requests: one journal entry) |
+| Request that failed (e.g. insufficient funds) | Not stored. After fixing the cause, the same key works |
+| Header missing or malformed | `400` |
+
+How it works: the key row is claimed, the ledger is updated and the response is stored **in one database transaction**, so a crash can't leave "paid but not recorded" or the reverse. A parallel request blocks on the key's unique index until the first one commits or rolls back.
 
 ```bash
 A=$(curl -s localhost:8080/accounts -H 'content-type: application/json' -d '{"ownerRef":"asha","currency":"INR"}' | jq -r .id)
 B=$(curl -s localhost:8080/accounts -H 'content-type: application/json' -d '{"ownerRef":"ravi","currency":"INR"}' | jq -r .id)
-curl -s localhost:8080/accounts/$A/top-ups -H 'content-type: application/json' -d '{"amountMinor":10000}'
+curl -s localhost:8080/accounts/$A/top-ups -H 'content-type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" -d '{"amountMinor":10000}'
 curl -s localhost:8080/transfers -H 'content-type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d "{\"fromAccountId\":\"$A\",\"toAccountId\":\"$B\",\"amountMinor\":2500}"
 ```
 
@@ -89,7 +106,7 @@ Java 25 · Spring Boot 4.1 (Web MVC, Data JPA, Validation, Actuator) · PostgreS
 1. ✅ Skeleton, Compose Postgres, Flyway V1 ledger schema, CI
 2. ✅ Accounts, top-ups and transfers (double-entry postings in one transaction, ordered row locks)
 3. ✅ Testcontainers run in CI; randomized concurrency test
-4. `Idempotency-Key` filter (replay → same response, different body → 422)
+4. ✅ `Idempotency-Key` support (replay → same response, different body → 422)
 5. JWT auth, OpenAPI docs, RFC 7807 errors
 6. Razorpay-style HMAC webhook; outbox poller
 7. Nightly reconciliation job, Prometheus metrics, Dockerfile, deploy
