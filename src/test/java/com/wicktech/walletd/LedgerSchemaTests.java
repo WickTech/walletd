@@ -6,14 +6,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /** The double-entry invariants the database itself enforces (V1__init.sql). */
-@SpringBootTest
-@Import(TestDatabaseConfig.class)
+@WalletdTest
 class LedgerSchemaTests {
 
     @Autowired
