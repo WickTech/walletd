@@ -173,7 +173,7 @@ curl -s localhost:8080/accounts/$B -H "Authorization: Bearer $RAVI"      # balan
 ## Testing
 
 ```bash
-./mvnw verify                 # 46 tests on real PostgreSQL 17 started in-process, no Docker needed
+./mvnw verify                 # 47 tests on real PostgreSQL 17 started in-process, no Docker needed
 ./mvnw verify -Pcontainer     # the same tests on the official postgres:17 image (Testcontainers)
 ```
 
